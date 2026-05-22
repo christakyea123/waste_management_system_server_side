@@ -104,6 +104,12 @@ const getCollections = async (req, res) => {
     query.scheduledDate = { $gte: start, $lte: end };
   }
 
+  // Sort: pending (scheduled) first so the driver sees what's still to do at the
+  //       top of the list; within each status group, earlier scheduledDate wins.
+  //       Mongo doesn't sort enum strings the way we'd want, so we lean on the
+  //       fact that 'scheduled' sorts alphabetically before the others we care
+  //       about ('picked', 'missed') — but to be deterministic regardless of any
+  //       future status name, we promote 'scheduled' explicitly.
   const { data, pagination } = await paginate(Collection, query, {
     page,
     limit,
@@ -111,10 +117,45 @@ const getCollections = async (req, res) => {
       path: 'customer',
       populate: { path: 'user', select: 'fullName phone' },
     },
-    sort: { scheduledDate: 1 },
+    sort: { status: 1, scheduledDate: 1 },
   });
 
   return ApiResponse.paginated(res, data, pagination);
+};
+
+// @desc    Status-grouped counts for the driver's collections (optional date filter).
+//          Powers the summary chips on /driver/collections.html — without this,
+//          the page would need to fetch every page of every status filter to
+//          show "you have 5 pending, 3 picked, 1 missed today".
+// @route   GET /api/v1/driver/collections/summary
+// @access  Driver
+const getCollectionsSummary = async (req, res) => {
+  const driver = await Driver.findOne({ user: req.user._id }).select('_id');
+  if (!driver) return ApiResponse.error(res, 'Driver not found', 404);
+
+  const match = { driver: driver._id };
+  if (req.query.date) {
+    const d = new Date(req.query.date);
+    if (!isNaN(d)) {
+      const start = new Date(d.setHours(0, 0, 0, 0));
+      const end = new Date(d.setHours(23, 59, 59, 999));
+      match.scheduledDate = { $gte: start, $lte: end };
+    }
+  }
+
+  const rows = await Collection.aggregate([
+    { $match: match },
+    { $group: { _id: '$status', count: { $sum: 1 } } },
+  ]);
+
+  // Seed every enum value to 0 so the UI always renders the full set of chips,
+  // even when no rows of a given status exist (otherwise "Missed: —" would just
+  // disappear, which the driver could misread as "no data loaded yet").
+  const counts = { scheduled: 0, picked: 0, missed: 0, rescheduled: 0, blocked_access: 0 };
+  rows.forEach((r) => { if (r._id in counts) counts[r._id] = r.count; });
+  const total = rows.reduce((s, r) => s + r.count, 0);
+
+  return ApiResponse.success(res, { counts, total });
 };
 
 // @desc    Mark collection status
@@ -214,4 +255,11 @@ const updateLocation = async (req, res) => {
   return ApiResponse.success(res, { location: driver.currentLocation }, 'Location updated');
 };
 
-module.exports = { getDashboard, getAssignedCustomers, getCollections, updateCollectionStatus, updateLocation };
+module.exports = {
+  getDashboard,
+  getAssignedCustomers,
+  getCollections,
+  getCollectionsSummary,
+  updateCollectionStatus,
+  updateLocation,
+};

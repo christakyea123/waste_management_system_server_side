@@ -13,7 +13,10 @@ const complaintSchema = new mongoose.Schema(
     },
     category: {
       type: String,
-      enum: ['missed_collection', 'billing_issue', 'driver_conduct', 'service_quality', 'other'],
+      // 'general_inquiry' is the bucket for messages submitted via the public
+      // landing-page "Contact Us" form — they route into the same admin inbox
+      // as service complaints so the team has one place to triage and reply.
+      enum: ['missed_collection', 'billing_issue', 'driver_conduct', 'service_quality', 'general_inquiry', 'other'],
       required: true,
     },
     subject: {

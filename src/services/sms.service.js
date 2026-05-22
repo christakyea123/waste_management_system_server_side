@@ -1,54 +1,102 @@
-const twilio = require('twilio');
+const axios = require('axios');
 const logger = require('../utils/logger');
 const Notification = require('../models/Notification');
 
+/**
+ * mNotify SMS provider.
+ *
+ * Docs: https://readthedocs.mnotify.com/  (Quick SMS endpoint)
+ *   POST {base}/sms/quick?key={MNOTIFY_API_KEY}
+ *   body: { recipient: ["233244..."], sender, message, is_schedule: "false", schedule_date: "" }
+ *
+ * Success response carries `code` / `status`. mNotify currently returns:
+ *   "code": "2000"  -> queued for delivery
+ *   anything else   -> failure (insufficient balance, invalid sender, etc.)
+ *
+ * The public method surface (`send`, `sendBulk`, `sendWelcome`, …) is unchanged
+ * from the previous Twilio implementation so no controller has to know which
+ * provider is wired in behind it.
+ */
 class SmsService {
   constructor() {
-    this.accountSid = process.env.TWILIO_ACCOUNT_SID;
-    this.authToken = process.env.TWILIO_AUTH_TOKEN;
-    this.fromNumber = process.env.TWILIO_PHONE_NUMBER;
-    this._client = null;
+    this.apiKey = process.env.MNOTIFY_API_KEY;
+    this.senderId = process.env.MNOTIFY_SENDER_ID;
+    this.baseUrl = process.env.MNOTIFY_BASE_URL || 'https://api.mnotify.com/api';
   }
 
-  get client() {
-    if (!this._client) {
-      if (!this.accountSid || !this.authToken) {
-        throw new Error('Twilio credentials not configured (TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN missing)');
-      }
-      this._client = twilio(this.accountSid, this.authToken);
-    }
-    return this._client;
-  }
-
-  // Normalize any Ghanaian phone to E.164 (+233XXXXXXXXX)
+  // mNotify wants recipients as Ghanaian numbers in 233XXXXXXXXX form (no plus,
+  // no leading zero). We accept anything callers throw at us and normalise.
   normalizePhone(phone) {
-    const cleaned = phone.replace(/[\s\-().]/g, '');
-    if (cleaned.startsWith('+')) return cleaned;
-    if (cleaned.startsWith('233')) return `+${cleaned}`;
-    if (cleaned.startsWith('0')) return `+233${cleaned.slice(1)}`;
-    return `+${cleaned}`;
+    const cleaned = String(phone || '').replace(/[\s\-().]/g, '');
+    if (cleaned.startsWith('+233')) return cleaned.slice(1);   // +233244... -> 233244...
+    if (cleaned.startsWith('233'))  return cleaned;
+    if (cleaned.startsWith('0'))    return `233${cleaned.slice(1)}`;
+    return cleaned;
+  }
+
+  isConfigured() {
+    return Boolean(this.apiKey && this.senderId);
   }
 
   async send(to, message) {
-    if (!this.accountSid || !this.authToken || !this.fromNumber) {
-      logger.warn(`SMS skipped (Twilio not configured) → ${to}: ${message.slice(0, 60)}...`);
-      return { success: false, error: 'Twilio not configured' };
+    if (!this.isConfigured()) {
+      logger.warn(`SMS skipped (mNotify not configured) → ${to}: ${message.slice(0, 60)}...`);
+      return { success: false, error: 'mNotify not configured' };
     }
 
-    const toFormatted = this.normalizePhone(to);
+    const recipient = this.normalizePhone(to);
 
     try {
-      const msg = await this.client.messages.create({
-        body: message,
-        from: this.fromNumber,
-        to: toFormatted,
-      });
+      const res = await axios.post(
+        `${this.baseUrl}/sms/quick`,
+        {
+          recipient: [recipient],
+          sender: this.senderId,
+          message,
+          is_schedule: 'false',
+          schedule_date: '',
+        },
+        {
+          // API key goes on the query string per mNotify spec.
+          params: { key: this.apiKey },
+          headers: { 'Content-Type': 'application/json' },
+          timeout: 15000,
+          // Don't throw on 4xx so we can read mNotify's structured error body
+          // and convert it into a graceful { success: false } result instead of
+          // bubbling an exception up into a controller and 500-ing the request.
+          validateStatus: (status) => status < 500,
+        },
+      );
 
-      logger.info(`SMS sent to ${toFormatted} | SID: ${msg.sid} | Status: ${msg.status}`);
-      return { success: true, data: { sid: msg.sid, status: msg.status } };
+      const data = res.data || {};
+      // mNotify success marker is `code: "2000"`. Some plans return `status: "success"`
+      // instead, so we treat either as the green path.
+      const code = String(data.code || '');
+      const status = String(data.status || '').toLowerCase();
+      const ok = code === '2000' || status === 'success';
+
+      if (!ok) {
+        const reason = data.message || data.error || `HTTP ${res.status}`;
+        logger.error(`SMS failed to ${recipient}: [${code || res.status}] ${reason}`);
+        return { success: false, error: reason, code: code || String(res.status) };
+      }
+
+      // mNotify returns a message id in `summary.message_id` or `data.message_id`
+      // depending on the response shape. Grab whichever is present so we can
+      // store it on the Notification row for traceability.
+      const messageId =
+        data?.summary?.message_id ||
+        data?.summary?.batch_id ||
+        data?.data?.message_id ||
+        null;
+
+      logger.info(`SMS sent to ${recipient} | id: ${messageId || 'n/a'} | code: ${code || 'ok'}`);
+      return { success: true, data: { sid: messageId, status: 'queued', raw: data } };
     } catch (error) {
-      logger.error(`SMS failed to ${toFormatted}: [${error.code}] ${error.message}`);
-      return { success: false, error: error.message, code: error.code };
+      // Reaches here only on a true network/timeout failure or 5xx, since
+      // 4xx is captured above via validateStatus.
+      logger.error(`SMS failed to ${recipient}: ${error.message}`);
+      return { success: false, error: error.message };
     }
   }
 

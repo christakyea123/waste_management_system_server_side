@@ -71,7 +71,10 @@ const paymentSchema = new mongoose.Schema(
 paymentSchema.index({ customer: 1 });
 paymentSchema.index({ invoice: 1 });
 paymentSchema.index({ status: 1 });
-paymentSchema.index({ paystackReference: 1 });
+// `paystackReference` is the durable handle for idempotency: webhook + user
+// callback both look up the Payment by this value, and we never want two rows
+// with the same reference. Sparse so legacy rows with null still validate.
+paymentSchema.index({ paystackReference: 1 }, { unique: true, sparse: true });
 
 paymentSchema.pre('save', function (next) {
   if (!this.transactionId) {

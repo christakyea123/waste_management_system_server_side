@@ -23,7 +23,7 @@ const initializePayment = async (req, res) => {
     return ApiResponse.error(res, 'Invoice already paid', 400);
   }
 
-  const callbackUrl = `${process.env.FRONTEND_URL}/customer/payment-callback`;
+  const callbackUrl = `${process.env.FRONTEND_URL}/customer/payment-callback.html`;
   const result = await paystackService.initializePayment(customer, invoice, callbackUrl);
 
   return ApiResponse.success(res, {
@@ -35,15 +35,24 @@ const initializePayment = async (req, res) => {
 
 // @desc    Verify payment after callback
 // @route   GET /api/v1/payments/verify/:reference
-// @access  Customer
+// @access  Customer / Admin
 const verifyPayment = async (req, res) => {
   const { reference } = req.params;
+
+  // Ownership check: customers may only verify their own references.
+  // Admin/superadmin can verify any (useful for support tooling).
+  if (req.user.role === 'customer') {
+    const customer = await Customer.findOne({ user: req.user._id }).select('_id');
+    if (!customer) return ApiResponse.error(res, 'Customer profile not found', 404);
+    const owned = await Payment.findOne({ paystackReference: reference, customer: customer._id }).select('_id');
+    if (!owned) return ApiResponse.error(res, 'Payment not found', 404);
+  }
 
   const result = await paystackService.verifyPayment(reference);
 
   if (result.success) {
     const customer = await Customer.findById(result.payment.customer).populate('user');
-    if (customer?.user) {
+    if (customer?.user && result.justSettled) {
       const invoice = await Invoice.findById(result.payment.invoice);
       smsService
         .sendPaymentSuccess(customer.user, result.payment.amount, invoice?.invoiceNumber)
