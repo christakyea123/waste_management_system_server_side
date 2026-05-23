@@ -127,7 +127,7 @@ class InvoiceService {
         const monthName = new Date(invoice.year, invoice.month - 1).toLocaleString('default', { month: 'long' });
 
         // Header
-        doc.fontSize(24).fillColor('#2E7D32').text('WASTE MANAGEMENT SYSTEM', { align: 'center' });
+        doc.fontSize(22).fillColor('#2E7D32').text('035 F Arkoh Waste Management', { align: 'center' });
         doc.fontSize(12).fillColor('#666').text('Professional Waste Collection Services', { align: 'center' });
         doc.moveDown(0.5);
         doc.moveTo(50, doc.y).lineTo(545, doc.y).strokeColor('#2E7D32').stroke();
@@ -200,7 +200,6 @@ class InvoiceService {
         doc.fontSize(10).fillColor('#666');
         doc.moveTo(50, doc.y).lineTo(545, doc.y).strokeColor('#ccc').stroke();
         doc.moveDown(0.5);
-        doc.text('Payment can be made online at wastemanagement.com/pay', { align: 'center' });
         doc.text('Thank you for your business!', { align: 'center' });
 
         doc.end();

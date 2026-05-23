@@ -50,10 +50,13 @@ class SmsService {
       const res = await axios.post(
         `${this.baseUrl}/sms/quick`,
         {
+          // mNotify expects a boolean here, not the string 'false'. Sending the
+          // wrong type used to cause silent validation rejections that surfaced
+          // as a generic "fraudulent" error from the gateway.
           recipient: [recipient],
           sender: this.senderId,
           message,
-          is_schedule: 'false',
+          is_schedule: false,
           schedule_date: '',
         },
         {
@@ -108,39 +111,39 @@ class SmsService {
   }
 
   async sendWelcome(user) {
-    const msg = `Welcome to WasteManagement! Dear ${user.fullName}, your account has been created successfully. For support call 0800-WASTE. Thank you for choosing us!`;
+    const msg = `Welcome to 035 F Arkoh Waste Management! Dear ${user.fullName}, your account is now active. Thank you for choosing us.`;
     return this.send(user.phone, msg);
   }
 
   async sendRegistrationAlert(admin, customer) {
-    const msg = `NEW REGISTRATION: ${customer.fullName} (${customer.phone}) registered. Address: ${customer.residentialAddress}. Please assign a driver.`;
+    const msg = `035 F Arkoh: New customer ${customer.fullName} (${customer.phone}) at ${customer.residentialAddress}. Please assign a driver.`;
     return this.send(admin.phone, msg);
   }
 
   async sendPaymentSuccess(user, amount, invoiceNumber) {
-    const msg = `Payment Confirmed! Dear ${user.fullName}, your payment of GHS ${amount} for invoice ${invoiceNumber} was successful. Thank you!`;
+    const msg = `035 F Arkoh: Dear ${user.fullName}, payment of GHS ${amount} received for invoice ${invoiceNumber}. Thank you for your continued service.`;
     return this.send(user.phone, msg);
   }
 
   async sendPaymentReminder(user, amount, dueDate, invoiceNumber) {
     const due = new Date(dueDate).toLocaleDateString('en-GH');
-    const msg = `Payment Reminder: Dear ${user.fullName}, your waste collection fee of GHS ${amount} (Invoice: ${invoiceNumber}) is due on ${due}. Pay at wastemanagement.com to avoid service interruption.`;
+    const msg = `035 F Arkoh: Hi ${user.fullName}, monthly fee GHS ${amount} (Invoice ${invoiceNumber}) is due on ${due}. Please pay to avoid service interruption.`;
     return this.send(user.phone, msg);
   }
 
   async sendCollectionReminder(user, date) {
     const d = new Date(date).toLocaleDateString('en-GH');
-    const msg = `Collection Reminder: Dear ${user.fullName}, your waste will be collected on ${d}. Please ensure your bin is placed outside by 6:00 AM.`;
+    const msg = `035 F Arkoh: Dear ${user.fullName}, your waste pickup is scheduled for ${d}. Please place your bin outside by 6:00 AM. Thank you.`;
     return this.send(user.phone, msg);
   }
 
   async sendCollectionConfirmation(user) {
-    const msg = `Collection Complete: Dear ${user.fullName}, your waste has been collected today. Thank you for keeping your bin ready. See you next collection!`;
+    const msg = `035 F Arkoh: Dear ${user.fullName}, your waste has been collected today. Thank you for keeping your bin ready. See you on the next pickup.`;
     return this.send(user.phone, msg);
   }
 
   async sendMissedCollection(user, reason) {
-    const msg = `Missed Collection: Dear ${user.fullName}, we were unable to collect your waste today. Reason: ${reason}. It will be rescheduled. We apologize for the inconvenience.`;
+    const msg = `035 F Arkoh: Hi ${user.fullName}, today's pickup was missed (${reason}). We'll reschedule shortly. Sorry for the delay.`;
     return this.send(user.phone, msg);
   }
 

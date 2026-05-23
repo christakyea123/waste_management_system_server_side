@@ -158,7 +158,7 @@ const updateCustomer = async (req, res) => {
     if (user) {
       await User.findByIdAndUpdate(user._id, { isActive: false });
       smsService
-        .send(user.phone, `Your WasteManagement account has been suspended. Contact support@wastemanagement.com`)
+        .send(user.phone, `035 F Arkoh: Dear ${user.fullName}, your account has been suspended. Please contact customer support to resolve this.`)
         .catch(logger.error);
     }
   }
@@ -219,7 +219,7 @@ const createDriver = async (req, res) => {
   });
 
   smsService
-    .send(phone, `Welcome to WasteManagement Driver Portal! Your Driver ID is ${driver.driverId}. Password: ${password} Login at wastemanagement.com/driver`)
+    .send(phone, `035 F Arkoh: Welcome ${fullName}. Driver ID: ${driver.driverId}, temp password: ${password}. Please log in and change your password promptly.`)
     .catch((e) => logger.error(`Driver welcome SMS failed: ${e.message}`));
 
   return ApiResponse.created(res, { driver }, 'Driver created successfully');

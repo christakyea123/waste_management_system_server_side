@@ -208,7 +208,7 @@ const forgotPassword = async (req, res) => {
   user.passwordResetExpires = new Date(Date.now() + 15 * 60 * 1000);
   await user.save({ validateBeforeSave: false });
 
-  smsService.send(user.phone, `WasteManagement password reset code: ${otp}. Valid for 15 minutes. Do not share this code.`)
+  smsService.send(user.phone, `035 F Arkoh: Hi ${user.fullName}, your password reset code is ${otp}. Valid 15 minutes. Do not share this code.`)
     .catch((e) => logger.error(`Password reset SMS failed: ${e.message}`));
 
   logger.info(`Password reset OTP for ${user.phone}: ${otp}`);
