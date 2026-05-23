@@ -8,7 +8,7 @@ const {
 } = require('../controllers/auth.controller');
 const { protect } = require('../middleware/auth.middleware');
 const { validate } = require('../middleware/validate.middleware');
-const { authLimiter, registrationLimiter } = require('../middleware/rateLimit.middleware');
+const { authLimiter, registrationLimiter, smsLimiter } = require('../middleware/rateLimit.middleware');
 const { uploadProfile, handleMulterError } = require('../middleware/upload.middleware');
 
 const registerValidation = [
@@ -39,7 +39,7 @@ router.put('/update-password', protect, [
   body('newPassword').isLength({ min: 8 }).withMessage('New password must be 8+ characters'),
 ], validate, updatePassword);
 router.put('/update-profile', protect, uploadProfile.single('profileImage'), handleMulterError, updateProfile);
-router.post('/forgot-password', [
+router.post('/forgot-password', smsLimiter, [
   body('phone').notEmpty().withMessage('Phone number is required'),
 ], validate, forgotPassword);
 router.post('/reset-password', [

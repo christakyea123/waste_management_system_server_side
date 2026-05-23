@@ -130,7 +130,8 @@ const getMe = async (req, res) => {
   let profile = null;
 
   if (user.role === 'customer') {
-    profile = await Customer.findOne({ user: user._id }).populate('assignedDriver');
+    profile = await Customer.findOne({ user: user._id })
+      .populate({ path: 'assignedDriver', populate: { path: 'user', select: 'fullName phone email profileImage' } });
   } else if (user.role === 'driver') {
     profile = await Driver.findOne({ user: user._id }).populate('assignedRoute');
   }

@@ -6,6 +6,7 @@ const Notification = require('../models/Notification');
 const ApiResponse = require('../utils/apiResponse');
 const { paginate } = require('../utils/pagination');
 const smsService = require('../services/sms.service');
+const invoiceService = require('../services/invoice.service');
 const logger = require('../utils/logger');
 const { uploadToCloudinary } = require('../config/cloudinary');
 
@@ -207,6 +208,15 @@ const updateCollectionStatus = async (req, res) => {
     } else if (status === 'missed') {
       await Customer.findByIdAndUpdate(collection.customer, { $inc: { missedCollections: 1 } });
     }
+  }
+
+  // Ensure this month's invoice exists, then refresh its picked/missed counters
+  // so the customer dashboard reflects the new pickup status.
+  try {
+    await invoiceService.ensureMonthlyInvoice(collection.customer, collection.month, collection.year);
+    await invoiceService.refreshInvoiceCounters(collection.customer, collection.month, collection.year);
+  } catch (e) {
+    logger.error(`Invoice sync after collection update failed: ${e.message}`);
   }
 
   // Notify customer via SMS

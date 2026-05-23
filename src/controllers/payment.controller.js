@@ -86,12 +86,21 @@ const handleWebhook = async (req, res) => {
 
 // @desc    Download invoice as PDF
 // @route   GET /api/v1/payments/invoice/:id/pdf
-// @access  Customer/Admin
+// @access  Customer (own invoice only) / Admin / SuperAdmin
 const downloadInvoicePdf = async (req, res) => {
   try {
-    const customer = await Customer.findOne({ user: req.user._id });
+    const role = req.user.role;
+
+    // Hard role check — only customers (for their own invoice) and admins may
+    // pull invoice PDFs. Drivers (and any future role) cannot enumerate invoices.
+    if (role !== 'customer' && role !== 'admin' && role !== 'superadmin') {
+      return ApiResponse.error(res, 'Forbidden', 403);
+    }
+
     const query = { _id: req.params.id };
-    if (req.user.role === 'customer' && customer) {
+    if (role === 'customer') {
+      const customer = await Customer.findOne({ user: req.user._id }).select('_id');
+      if (!customer) return ApiResponse.error(res, 'Customer profile not found', 404);
       query.customer = customer._id;
     }
 

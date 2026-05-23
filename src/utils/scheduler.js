@@ -3,6 +3,12 @@ const logger = require('./logger');
 const invoiceService = require('../services/invoice.service');
 
 const initScheduler = () => {
+  // One-time backfill on startup: create invoices for any past collections that
+  // never got billed (e.g. mid-month registrations before the 1st-of-month cron).
+  invoiceService
+    .backfillMissingInvoices()
+    .catch((err) => logger.error(`Startup invoice backfill failed: ${err.message}`));
+
   // Generate monthly invoices on the 1st of every month at 6 AM
   cron.schedule('0 6 1 * *', async () => {
     logger.info('Running monthly invoice generation...');

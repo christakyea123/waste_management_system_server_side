@@ -7,6 +7,79 @@ const logger = require('../utils/logger');
 const smsService = require('./sms.service');
 
 class InvoiceService {
+  // Ensure an invoice exists for a given customer/month/year. Called whenever a
+  // collection is scheduled or picked so the customer always has something to
+  // pay — without waiting for the 1st-of-month cron job. Returns the invoice
+  // (existing or newly created). Safe to call repeatedly.
+  async ensureMonthlyInvoice(customerId, month, year) {
+    try {
+      const existing = await Invoice.findOne({ customer: customerId, month, year });
+      if (existing) return existing;
+
+      const customer = await Customer.findById(customerId);
+      if (!customer) return null;
+
+      const dueDay = parseInt(process.env.BILLING_DUE_DAY) || 25;
+      const dueDate = new Date(year, month - 1, dueDay);
+      const monthName = new Date(year, month - 1).toLocaleString('default', { month: 'long' });
+
+      const invoice = await Invoice.create({
+        customer: customer._id,
+        month,
+        year,
+        amount: customer.monthlyFee,
+        dueDate,
+        description: `Waste collection service for ${monthName} ${year}`,
+      });
+
+      logger.info(`Auto-generated invoice ${invoice.invoiceNumber} for customer ${customer.customerId}`);
+      return invoice;
+    } catch (err) {
+      // Likely a duplicate from a race — re-fetch and return whatever's there.
+      logger.error(`ensureMonthlyInvoice(${customerId}, ${month}, ${year}) failed: ${err.message}`);
+      return Invoice.findOne({ customer: customerId, month, year });
+    }
+  }
+
+  // Recalculate collectionsCount / missedCount on an existing invoice. Called
+  // after a collection's status flips so the invoice reflects reality.
+  async refreshInvoiceCounters(customerId, month, year) {
+    const invoice = await Invoice.findOne({ customer: customerId, month, year });
+    if (!invoice) return null;
+    const collections = await Collection.find({ customer: customerId, month, year });
+    invoice.collectionsCount = collections.filter((c) => c.status === 'picked').length;
+    invoice.missedCount = collections.filter((c) => c.status === 'missed').length;
+    await invoice.save();
+    return invoice;
+  }
+
+  // Walk every existing collection and make sure the matching monthly invoice
+  // exists. Used at startup to recover from any pre-fix collections that were
+  // marked picked while invoice creation wasn't yet wired up.
+  async backfillMissingInvoices() {
+    try {
+      const pairs = await Collection.aggregate([
+        { $group: { _id: { customer: '$customer', month: '$month', year: '$year' } } },
+      ]);
+      let created = 0;
+      for (const p of pairs) {
+        const { customer, month, year } = p._id;
+        const existing = await Invoice.findOne({ customer, month, year });
+        if (existing) continue;
+        const made = await this.ensureMonthlyInvoice(customer, month, year);
+        if (made) {
+          created++;
+          await this.refreshInvoiceCounters(customer, month, year);
+        }
+      }
+      if (created > 0) logger.info(`Backfilled ${created} missing invoice(s)`);
+      return created;
+    } catch (err) {
+      logger.error(`backfillMissingInvoices failed: ${err.message}`);
+      return 0;
+    }
+  }
+
   // Generate monthly invoices for all active customers
   async generateMonthlyInvoices(month, year) {
     try {

@@ -13,7 +13,7 @@ const { paginate } = require('../utils/pagination');
 const getDashboard = async (req, res) => {
   const customer = await Customer.findOne({ user: req.user._id })
     .populate('user', '-password')
-    .populate('assignedDriver');
+    .populate({ path: 'assignedDriver', populate: { path: 'user', select: 'fullName phone email profileImage' } });
 
   if (!customer) return ApiResponse.error(res, 'Customer profile not found', 404);
 

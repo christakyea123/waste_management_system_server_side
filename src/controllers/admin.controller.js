@@ -106,7 +106,10 @@ const getCustomers = async (req, res) => {
   const { data, pagination } = await paginate(Customer, query, {
     page,
     limit,
-    populate: { path: 'user', select: 'fullName email phone profileImage isActive lastLogin' },
+    populate: [
+      { path: 'user', select: 'fullName email phone profileImage isActive lastLogin' },
+      { path: 'assignedDriver', populate: { path: 'user', select: 'fullName phone' } },
+    ],
     sort: { createdAt: -1 },
   });
 
@@ -119,7 +122,7 @@ const getCustomers = async (req, res) => {
 const getCustomer = async (req, res) => {
   const customer = await Customer.findById(req.params.id)
     .populate('user', '-password')
-    .populate('assignedDriver')
+    .populate({ path: 'assignedDriver', populate: { path: 'user', select: 'fullName phone email' } })
     .populate('collectionRoute', 'name zone');
 
   if (!customer) return ApiResponse.error(res, 'Customer not found', 404);
@@ -364,6 +367,71 @@ const sendBulkSms = async (req, res) => {
   return ApiResponse.success(res, { sent: successCount, total: uniquePhones.length }, 'Bulk SMS completed');
 };
 
+// @desc    Get customers with outstanding (unpaid) invoice balances.
+//          Powers the admin dashboard "Customers Owing" panel — each row shows
+//          who owes how much across all their pending/overdue invoices.
+// @route   GET /api/v1/admin/outstanding
+// @access  Admin
+const getOutstanding = async (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit) || 100, 500);
+
+  const rows = await Invoice.aggregate([
+    { $match: { status: { $in: ['pending', 'overdue'] } } },
+    {
+      $group: {
+        _id: '$customer',
+        outstanding: { $sum: '$totalAmount' },
+        invoiceCount: { $sum: 1 },
+        oldestDueDate: { $min: '$dueDate' },
+        hasOverdue: { $max: { $cond: [{ $eq: ['$status', 'overdue'] }, 1, 0] } },
+      },
+    },
+    { $sort: { outstanding: -1 } },
+    { $limit: limit },
+    {
+      $lookup: {
+        from: 'customers',
+        localField: '_id',
+        foreignField: '_id',
+        as: 'customer',
+      },
+    },
+    { $unwind: '$customer' },
+    {
+      $lookup: {
+        from: 'users',
+        localField: 'customer.user',
+        foreignField: '_id',
+        as: 'user',
+      },
+    },
+    { $unwind: '$user' },
+    {
+      $project: {
+        _id: 0,
+        customerId: '$customer._id',
+        customerNumber: '$customer.customerId',
+        fullName: '$user.fullName',
+        phone: '$user.phone',
+        email: '$user.email',
+        profileImage: '$user.profileImage',
+        binType: '$customer.binType',
+        outstanding: 1,
+        invoiceCount: 1,
+        oldestDueDate: 1,
+        hasOverdue: 1,
+      },
+    },
+  ]);
+
+  const totalOutstanding = rows.reduce((s, r) => s + (r.outstanding || 0), 0);
+  return ApiResponse.success(res, {
+    customers: rows,
+    totalOutstanding,
+    customerCount: rows.length,
+  });
+};
+
 // @desc    Get revenue analytics
 // @route   GET /api/v1/admin/analytics/revenue
 // @access  Admin
@@ -477,11 +545,12 @@ const getActivityLogs = async (req, res) => {
 // @route   GET /api/v1/admin/invoices
 // @access  Admin
 const getInvoices = async (req, res) => {
-  const { page, limit, status, month, year } = req.query;
+  const { page, limit, status, month, year, customer } = req.query;
   const query = {};
   if (status) query.status = status;
   if (month) query.month = parseInt(month);
   if (year) query.year = parseInt(year);
+  if (customer) query.customer = customer;
 
   const { data, pagination } = await paginate(Invoice, query, {
     page,
@@ -659,7 +728,7 @@ const updatePricing = async (req, res) => {
 module.exports = {
   getDashboard, getCustomers, getCustomer, updateCustomer, deleteCustomer,
   createDriver, getDriver, getDrivers, updateDriver, deleteDriver, assignCustomers,
-  sendBulkSms, getRevenueAnalytics, getCollectionAnalytics, getActivityLogs,
+  sendBulkSms, getOutstanding, getRevenueAnalytics, getCollectionAnalytics, getActivityLogs,
   getInvoices, generateInvoices, sendPaymentReminders, sendInvoiceReminder,
   getAdminComplaints, updateComplaint,
   getRoutes, createRoute, updateRoute, deleteRoute,
