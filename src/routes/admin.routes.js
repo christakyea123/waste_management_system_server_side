@@ -4,7 +4,7 @@ const { body } = require('express-validator');
 const {
   getDashboard, getCustomers, getCustomer, updateCustomer, deleteCustomer,
   createDriver, getDriver, getDrivers, updateDriver, deleteDriver, assignCustomers,
-  sendBulkSms, getOutstanding, getRevenueAnalytics, getCollectionAnalytics, getActivityLogs,
+  sendBulkSms, getOutstanding, getLiveSchedule, runAutoSchedule, getRevenueAnalytics, getCollectionAnalytics, getActivityLogs,
   getInvoices, generateInvoices, sendPaymentReminders, sendInvoiceReminder,
   getAdminComplaints, updateComplaint,
   getRoutes, createRoute, updateRoute, deleteRoute,
@@ -20,6 +20,8 @@ router.use(protect, isAdmin);
 // Dashboard
 router.get('/dashboard', getDashboard);
 router.get('/outstanding', getOutstanding);
+router.get('/live-schedule', getLiveSchedule);
+router.post('/auto-schedule/run', runAutoSchedule);
 
 // Customer management
 router.get('/customers', getCustomers);

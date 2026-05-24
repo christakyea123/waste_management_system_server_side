@@ -13,6 +13,7 @@ const ApiResponse = require('../utils/apiResponse');
 const { paginate } = require('../utils/pagination');
 const smsService = require('../services/sms.service');
 const invoiceService = require('../services/invoice.service');
+const scheduleService = require('../services/schedule.service');
 const logger = require('../utils/logger');
 const { uploadToCloudinary } = require('../config/cloudinary');
 
@@ -147,12 +148,22 @@ const updateCustomer = async (req, res) => {
   const customer = await Customer.findById(req.params.id);
   if (!customer) return ApiResponse.error(res, 'Customer not found', 404);
 
+  // Snapshot the fields the auto-scheduler cares about *before* mutating, so we
+  // can decide whether the pickup calendar needs regenerating after save.
+  const prev = {
+    assignedDriver: String(customer.assignedDriver || ''),
+    binType: customer.binType,
+    day: customer.collectionSchedule?.day,
+    frequency: customer.collectionSchedule?.frequency,
+    accountStatus: customer.accountStatus,
+  };
+
   if (accountStatus) customer.accountStatus = accountStatus;
   if (assignedDriver !== undefined) customer.assignedDriver = assignedDriver || null;
   if (collectionZone) customer.collectionZone = collectionZone;
   if (binType) customer.binType = binType;
   if (notes !== undefined) customer.notes = notes;
-  if (collectionSchedule) customer.collectionSchedule = collectionSchedule;
+  if (collectionSchedule) customer.collectionSchedule = { ...customer.collectionSchedule?.toObject?.() || {}, ...collectionSchedule };
 
   await customer.save();
 
@@ -168,6 +179,31 @@ const updateCustomer = async (req, res) => {
 
   if (accountStatus === 'active') {
     await User.findByIdAndUpdate(customer.user, { isActive: true });
+  }
+
+  // Auto-scheduling: any change that affects WHO picks up or WHEN means we
+  // should rebuild the rolling window for this customer. Skip if they just
+  // got suspended — no point materialising pickups we won't honour.
+  const driverChanged = prev.assignedDriver !== String(customer.assignedDriver || '');
+  const binChanged = customer.binType !== prev.binType;
+  const dayChanged = customer.collectionSchedule?.day !== prev.day;
+  const freqChanged = customer.collectionSchedule?.frequency !== prev.frequency;
+  const becameActive = prev.accountStatus !== 'active' && customer.accountStatus === 'active';
+  const scheduleAffected = driverChanged || binChanged || dayChanged || freqChanged || becameActive;
+
+  if (scheduleAffected && customer.accountStatus === 'active') {
+    try {
+      // Clear future scheduled rows first so a driver reassignment doesn't
+      // leave the old driver staring at pickups that are no longer theirs.
+      const cleared = await scheduleService.clearFutureScheduled(customer._id);
+      const result = await scheduleService.generateForCustomer(customer);
+      logger.info(`Auto-schedule for ${customer.customerId}: cleared ${cleared}, created ${result.created}`);
+    } catch (err) {
+      logger.error(`Auto-schedule failed for ${customer.customerId}: ${err.message}`);
+    }
+  } else if (customer.accountStatus !== 'active' && (driverChanged || becameActive === false)) {
+    // Customer was deactivated or had driver removed — clear future pickups.
+    await scheduleService.clearFutureScheduled(customer._id).catch(() => {});
   }
 
   return ApiResponse.success(res, { customer }, 'Customer updated successfully');
@@ -333,6 +369,16 @@ const assignCustomers = async (req, res) => {
   driver.assignedCustomers = [...new Set([...driver.assignedCustomers.map(String), ...customerIds])];
   await driver.save();
 
+  // Auto-schedule pickups for every newly-assigned customer. Run in background
+  // so the admin response doesn't wait on many round-trips. Any failures get
+  // logged; the daily cron will pick stragglers up on the next run.
+  Promise.all(
+    customerIds.map(async (id) => {
+      await scheduleService.clearFutureScheduled(id).catch(() => {});
+      return scheduleService.generateForCustomer(id);
+    })
+  ).catch((err) => logger.error(`Bulk assign auto-schedule failed: ${err.message}`));
+
   return ApiResponse.success(res, { driver }, 'Customers assigned successfully');
 };
 
@@ -429,6 +475,84 @@ const getOutstanding = async (req, res) => {
     customers: rows,
     totalOutstanding,
     customerCount: rows.length,
+  });
+};
+
+// @desc    Manually trigger the auto-scheduler for all active customers.
+//         Normally runs at startup + daily, but admins may want to re-sync
+//         after a bulk change (e.g. they reassigned several drivers at once).
+// @route   POST /api/v1/admin/auto-schedule/run
+// @access  Admin
+const runAutoSchedule = async (req, res) => {
+  const result = await scheduleService.generateForAll();
+  return ApiResponse.success(res, result, `Auto-scheduled ${result.created} new pickup(s) across ${result.customers} customer(s)`);
+};
+
+// @desc    Live pickup schedule for the next N days, grouped by driver. Powers
+//         the admin dashboard "who picks who, when" panel. Returns flat rows
+//         and a `byDriver` index so the frontend can pivot either way.
+// @route   GET /api/v1/admin/live-schedule
+// @access  Admin
+const getLiveSchedule = async (req, res) => {
+  const days = Math.min(Math.max(parseInt(req.query.days, 10) || 7, 1), 30);
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  const end = new Date(start);
+  end.setDate(end.getDate() + days);
+  end.setHours(23, 59, 59, 999);
+
+  const rows = await Collection.find({
+    scheduledDate: { $gte: start, $lte: end },
+  })
+    .populate({ path: 'customer', populate: { path: 'user', select: 'fullName phone' } })
+    .populate({ path: 'driver', populate: { path: 'user', select: 'fullName phone profileImage' } })
+    .sort({ scheduledDate: 1 })
+    .lean();
+
+  // Group by driver id (or 'unassigned'). Each driver entry carries the
+  // driver header + a list of {date, status, customer} entries.
+  const byDriver = {};
+  for (const r of rows) {
+    const drvKey = r.driver?._id?.toString() || 'unassigned';
+    if (!byDriver[drvKey]) {
+      byDriver[drvKey] = {
+        driverId: drvKey,
+        driverName: r.driver?.user?.fullName || 'Unassigned',
+        driverPhone: r.driver?.user?.phone || null,
+        driverImage: r.driver?.user?.profileImage || null,
+        truckNumber: r.driver?.truckNumber || null,
+        pickups: [],
+        counts: { scheduled: 0, picked: 0, missed: 0, total: 0 },
+      };
+    }
+    byDriver[drvKey].pickups.push({
+      _id: r._id,
+      scheduledDate: r.scheduledDate,
+      status: r.status,
+      collectedAt: r.collectedAt,
+      customerId: r.customer?.customerId,
+      customerName: r.customer?.user?.fullName || 'N/A',
+      customerPhone: r.customer?.user?.phone || null,
+      customerAddress: r.customer?.residentialAddress || null,
+    });
+    byDriver[drvKey].counts.total += 1;
+    if (r.status in byDriver[drvKey].counts) byDriver[drvKey].counts[r.status] += 1;
+  }
+
+  // Summary counts across the whole window — useful for the dashboard header.
+  const summary = {
+    days,
+    total: rows.length,
+    scheduled: rows.filter((r) => r.status === 'scheduled').length,
+    picked: rows.filter((r) => r.status === 'picked').length,
+    missed: rows.filter((r) => r.status === 'missed').length,
+    driversWithWork: Object.keys(byDriver).length,
+  };
+
+  return ApiResponse.success(res, {
+    summary,
+    drivers: Object.values(byDriver),
+    rows,
   });
 };
 
@@ -728,7 +852,7 @@ const updatePricing = async (req, res) => {
 module.exports = {
   getDashboard, getCustomers, getCustomer, updateCustomer, deleteCustomer,
   createDriver, getDriver, getDrivers, updateDriver, deleteDriver, assignCustomers,
-  sendBulkSms, getOutstanding, getRevenueAnalytics, getCollectionAnalytics, getActivityLogs,
+  sendBulkSms, getOutstanding, getLiveSchedule, runAutoSchedule, getRevenueAnalytics, getCollectionAnalytics, getActivityLogs,
   getInvoices, generateInvoices, sendPaymentReminders, sendInvoiceReminder,
   getAdminComplaints, updateComplaint,
   getRoutes, createRoute, updateRoute, deleteRoute,

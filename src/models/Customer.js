@@ -64,10 +64,13 @@ const customerSchema = new mongoose.Schema(
         enum: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'],
         default: 'monday',
       },
+      // biweekly  = twice a month  (Basic plan)
+      // weekly    = once a week    (Standard plan)
+      // twice_weekly = twice a week (Premium plan)
       frequency: {
         type: String,
-        enum: ['weekly', 'biweekly'],
-        default: 'weekly',
+        enum: ['biweekly', 'weekly', 'twice_weekly'],
+        default: 'biweekly',
       },
     },
     monthlyFee: {
@@ -127,14 +130,33 @@ customerSchema.pre('save', async function (next) {
   next();
 });
 
-// Set monthly fee based on bin type. Pricing lives in the Settings collection
-// (editable by admins from the dashboard) with env-var fallback for fresh installs.
+// Map each bin type to its default collection cadence. Kept here (not in
+// Settings) because cadence is a product decision baked into each plan tier,
+// not something we'd want admins flipping per-customer from the pricing page.
+const BIN_FREQUENCY = {
+  basic:    'biweekly',     // twice a month
+  standard: 'weekly',       // once a week
+  premium:  'twice_weekly', // twice a week
+};
+
+// Set monthly fee + collection frequency based on bin type. Pricing lives in
+// the Settings collection (editable by admins) with env-var fallback; frequency
+// follows the tier so a Basic customer always defaults to twice-a-month pickup.
 customerSchema.pre('save', async function (next) {
-  if (!this.isModified('binType') && this.monthlyFee) return next();
+  const binChanged = this.isModified('binType');
+  if (!binChanged && this.monthlyFee) return next();
   try {
     const Settings = mongoose.model('Settings');
     const pricing = await Settings.getPricing();
     this.monthlyFee = pricing[this.binType] ?? pricing.basic;
+
+    // Only overwrite the frequency on bin change (or on first save) — don't
+    // stomp an admin's manual override on subsequent saves.
+    if (binChanged || !this.collectionSchedule?.frequency) {
+      this.collectionSchedule = this.collectionSchedule || {};
+      this.collectionSchedule.frequency = BIN_FREQUENCY[this.binType] || 'biweekly';
+    }
+
     next();
   } catch (err) {
     next(err);
