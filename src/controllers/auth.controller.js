@@ -113,11 +113,12 @@ const login = async (req, res) => {
 // @route   POST /api/v1/auth/logout
 // @access  Private
 const logout = async (req, res) => {
+  const isProd = process.env.NODE_ENV === 'production';
   res.cookie('token', '', {
     expires: new Date(0), // immediately expired — browser deletes it
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
+    secure: isProd,
+    sameSite: isProd ? 'none' : 'strict',
   });
   return ApiResponse.success(res, {}, 'Logged out successfully');
 };

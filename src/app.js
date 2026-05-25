@@ -11,6 +11,7 @@ const xssClean = require('xss-clean');
 const hpp = require('hpp');
 const cookieParser = require('cookie-parser');
 const path = require('path');
+const fs = require('fs');
 
 const { generalLimiter } = require('./middleware/rateLimit.middleware');
 const { errorHandler, notFound } = require('./middleware/error.middleware');
@@ -85,9 +86,11 @@ if (process.env.NODE_ENV === 'development') {
 // Rate limiting
 app.use('/api/', generalLimiter);
 
-// Serve static frontend files with smart caching:
-// HTML — no-cache so updates are always visible
-// Assets (css/js/img) — 1-day cache with ETag revalidation
+// Serve static frontend files only if the frontend folder is present alongside the backend
+// (local dev). In production the frontend is hosted separately on cPanel.
+const frontendPublicPath = path.join(__dirname, '../../frontend/public');
+const frontendRootPath = path.join(__dirname, '../../frontend');
+const serveFrontend = fs.existsSync(frontendPublicPath);
 const staticOpts = {
   etag: true,
   lastModified: true,
@@ -99,8 +102,10 @@ const staticOpts = {
     }
   },
 };
-app.use(express.static(path.join(__dirname, '../../frontend/public'), staticOpts));
-app.use(express.static(path.join(__dirname, '../../frontend'), staticOpts));
+if (serveFrontend) {
+  app.use(express.static(frontendPublicPath, staticOpts));
+  app.use(express.static(frontendRootPath, staticOpts));
+}
 
 // API Routes
 app.use('/api/v1/auth', authRoutes);
@@ -120,14 +125,16 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// SPA fallback — only for non-API routes that static middleware didn't handle
-app.get('*', (req, res, next) => {
-  if (req.path.startsWith('/api')) return next();
-  res.sendFile(
-    path.join(__dirname, '../../frontend/public/index.html'),
-    (err) => { if (err) next(err); }
-  );
-});
+// SPA fallback — only when frontend files are bundled with the backend (local dev).
+if (serveFrontend) {
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api')) return next();
+    res.sendFile(
+      path.join(frontendPublicPath, 'index.html'),
+      (err) => { if (err) next(err); }
+    );
+  });
+}
 
 // 404 + error handling (catches unknown API routes and file-send errors)
 app.use(notFound);
