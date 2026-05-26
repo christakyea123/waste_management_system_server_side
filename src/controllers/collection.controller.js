@@ -40,11 +40,11 @@ const createCollection = async (req, res) => {
     year: d.getFullYear(),
   });
 
-  // Auto-create this month's invoice if missing so the customer can pay even
-  // before the 1st-of-month invoice cron runs.
+  // Per-pickup invoicing: every Collection gets its own invoice priced at
+  // plan.monthlyFee / plan.pickupsPerMonth.
   invoiceService
-    .ensureMonthlyInvoice(customer._id, d.getMonth() + 1, d.getFullYear())
-    .catch((e) => logger.error(`ensureMonthlyInvoice failed: ${e.message}`));
+    .ensurePickupInvoice(collection)
+    .catch((e) => logger.error(`ensurePickupInvoice failed: ${e.message}`));
 
   // Send reminder SMS
   smsService
@@ -110,15 +110,11 @@ const bulkCreateCollections = async (req, res) => {
 
   const collections = await Collection.insertMany(collectionsData, { ordered: false });
 
-  // Auto-create monthly invoices for every customer we just scheduled. Fire-and-forget
-  // so the response stays snappy even on large bulk creates.
-  const invoiceMonth = d.getMonth() + 1;
-  const invoiceYear = d.getFullYear();
+  // Per-pickup invoicing: one invoice per Collection. Fire-and-forget so the
+  // response stays snappy even on large bulk creates.
   Promise.all(
-    collectionsData.map((c) =>
-      invoiceService.ensureMonthlyInvoice(c.customer, invoiceMonth, invoiceYear)
-    )
-  ).catch((e) => logger.error(`Bulk ensureMonthlyInvoice failed: ${e.message}`));
+    collections.map((c) => invoiceService.ensurePickupInvoice(c))
+  ).catch((e) => logger.error(`Bulk ensurePickupInvoice failed: ${e.message}`));
 
   return ApiResponse.created(
     res,

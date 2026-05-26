@@ -38,8 +38,13 @@ const ensureUnsignedPreset = async () => {
   }
 };
 
-// Run on import (non-blocking)
-ensureUnsignedPreset();
+// Run on import (non-blocking). Skipped under Jest because the in-flight TLS
+// socket to Cloudinary kept the test runner alive after the suite finished
+// (caught by --detectOpenHandles as a TLSWRAP). Production callers can still
+// invoke ensureUnsignedPreset() explicitly if they want to warm the preset.
+if (process.env.NODE_ENV !== 'test' && !process.env.JEST_WORKER_ID) {
+  ensureUnsignedPreset();
+}
 
 // ── Upload helper ───────────────────────────────────────────────
 // Accepts a multer file (memoryStorage buffer) and uploads to Cloudinary

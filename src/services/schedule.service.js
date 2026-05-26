@@ -6,31 +6,41 @@ const logger = require('../utils/logger');
 /**
  * Auto-scheduling service.
  *
- * Replaces the old "admin manually picks a date and bulk-creates" workflow.
- * Every active customer with an assigned driver has their pickups materialized
- * into Collection rows on a rolling window so:
- *   - The driver portal always shows the upcoming week of work.
- *   - The admin dashboard can render "today/tomorrow by driver" without any
- *     materialization at query time.
- *   - Counters (collectionsCount / missedCount on Invoice) update naturally
- *     when the driver marks rows picked/missed.
+ * Calendar-month scheduling: every active customer with an assigned driver gets
+ * EXACTLY the number of pickups their plan entitles them to, per calendar month:
+ *   basic    (biweekly)     → 2 pickups / month (Basic plan)
+ *   standard (weekly)       → 4 pickups / month (Standard plan)
+ *   premium  (twice_weekly) → 8 pickups / month (Premium plan)
  *
- * Frequency mapping (see Customer.js BIN_FREQUENCY):
- *   biweekly      → twice a month  (anchor day, every 14 days)
- *   weekly        → once a week    (anchor day, every 7 days)
- *   twice_weekly  → twice a week   (anchor day + anchor+3 days, every 7 days)
+ * Why per-month instead of a rolling window: the customer pays a monthly fee
+ * that explicitly buys N pickups. Scheduling 3 biweekly pickups inside a 30-day
+ * rolling window (which happens when the anchor day aligns) would let a Basic
+ * customer get a free pickup every other month. The calendar-month cap matches
+ * the per-pickup invoicing model 1:1.
+ *
+ * Each created Collection gets its own per-pickup invoice (see invoice.service)
+ * so the customer dashboard shows one bill per pickup, priced at
+ * monthlyFee / pickupsPerMonth.
  */
 
-// Mongoose day enum is lowercase; JS Date.getDay() is 0=Sunday..6=Saturday.
 const DAY_INDEX = {
   sunday: 0, monday: 1, tuesday: 2, wednesday: 3,
   thursday: 4, friday: 5, saturday: 6,
 };
 
-// Default rolling window. 30 days covers ~4 weeks for weekly, ~8 pickups for
-// twice-weekly, ~2 pickups for biweekly — enough lookahead for the driver UI
-// without blowing out the Collection collection between cron runs.
-const DEFAULT_WINDOW_DAYS = parseInt(process.env.SCHEDULE_WINDOW_DAYS, 10) || 30;
+// Pickups per calendar month for each frequency. Drives both the scheduler and
+// the per-pickup invoice amount (monthlyFee / pickupsPerMonth).
+const PICKUPS_PER_MONTH = {
+  biweekly: 2,
+  weekly: 4,
+  twice_weekly: 8,
+};
+
+const pickupsPerMonth = (frequency) => PICKUPS_PER_MONTH[frequency] || 2;
+
+// How many months ahead to materialise. Two months = current + next, so drivers
+// always see at least 30 days of work even at month-end.
+const MONTHS_AHEAD = parseInt(process.env.SCHEDULE_MONTHS_AHEAD, 10) || 2;
 
 const startOfDay = (d) => {
   const x = new Date(d);
@@ -43,51 +53,62 @@ const ymd = (d) => {
   return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
 };
 
-const computeTargetDates = (frequency, anchorDayName, from, windowEnd) => {
+// Pick dates inside [monthStart, monthEnd] for one frequency / anchor combo.
+// Returns at most pickupsPerMonth(frequency) Date objects, all within the month.
+const computeMonthlyDates = (frequency, anchorDayName, year, month) => {
   const anchorIdx = DAY_INDEX[anchorDayName] ?? 1; // default Monday
-  const targets = [];
+  const monthStart = new Date(year, month - 1, 1);
+  const monthEnd = new Date(year, month, 0); // last day of month
+  monthEnd.setHours(23, 59, 59, 999);
 
-  // Find the first occurrence of the anchor day on or after `from`.
-  let cursor = startOfDay(from);
-  const offsetToAnchor = (anchorIdx - cursor.getDay() + 7) % 7;
-  cursor.setDate(cursor.getDate() + offsetToAnchor);
+  // First occurrence of the anchor weekday on or after the 1st.
+  const firstAnchor = new Date(monthStart);
+  const offset = (anchorIdx - firstAnchor.getDay() + 7) % 7;
+  firstAnchor.setDate(firstAnchor.getDate() + offset);
+
+  const cap = pickupsPerMonth(frequency);
+  const dates = [];
 
   if (frequency === 'biweekly') {
-    while (cursor <= windowEnd) {
-      targets.push(new Date(cursor));
+    // Two pickups, ~2 weeks apart. Anchor week + (anchor + 14 days).
+    let cursor = new Date(firstAnchor);
+    while (dates.length < cap && cursor <= monthEnd) {
+      dates.push(new Date(cursor));
       cursor.setDate(cursor.getDate() + 14);
     }
   } else if (frequency === 'twice_weekly') {
-    // Primary anchor + a second pickup 3 days later. If anchor is Friday we
-    // wrap into Monday rather than Sunday (which is outside the Mon–Sat enum).
-    while (cursor <= windowEnd) {
-      targets.push(new Date(cursor));
+    // Two pickups per week (anchor + anchor+3) for ~4 weeks = 8.
+    let cursor = new Date(firstAnchor);
+    while (dates.length < cap && cursor <= monthEnd) {
+      dates.push(new Date(cursor));
+      if (dates.length >= cap) break;
       const second = new Date(cursor);
       second.setDate(second.getDate() + 3);
-      // Clamp to Mon–Sat: if we'd land on Sunday, bump to Monday.
+      // Skip Sunday (outside the Mon-Sat enum) — bump to Monday.
       if (second.getDay() === 0) second.setDate(second.getDate() + 1);
-      if (second <= windowEnd) targets.push(second);
+      if (second <= monthEnd) dates.push(second);
       cursor.setDate(cursor.getDate() + 7);
     }
   } else {
-    // 'weekly' or anything we don't recognise — fall back to once-a-week.
-    while (cursor <= windowEnd) {
-      targets.push(new Date(cursor));
+    // 'weekly' (or unknown) — one pickup per week of the month.
+    let cursor = new Date(firstAnchor);
+    while (dates.length < cap && cursor <= monthEnd) {
+      dates.push(new Date(cursor));
       cursor.setDate(cursor.getDate() + 7);
     }
   }
 
-  return targets;
+  return dates.slice(0, cap);
 };
 
 /**
- * Materialise upcoming Collection rows for one customer.
- * Idempotent: skips any (customer, scheduledDate) pair that already exists.
+ * Materialise pickup rows for one customer, one calendar month.
+ * Caps creation at (pickupsPerMonth - existingCount) so re-running this never
+ * over-schedules a customer who already has rows for the month.
  *
  * Returns { created, skipped, reason? }.
  */
-const generateForCustomer = async (customer, opts = {}) => {
-  // The caller may pass a plain id or a populated document — normalise.
+const generateForCustomerMonth = async (customer, year, month) => {
   let doc = customer;
   if (typeof customer === 'string' || customer instanceof require('mongoose').Types.ObjectId) {
     doc = await Customer.findById(customer);
@@ -96,32 +117,34 @@ const generateForCustomer = async (customer, opts = {}) => {
   if (doc.accountStatus !== 'active') return { created: 0, skipped: 0, reason: 'inactive' };
   if (!doc.assignedDriver) return { created: 0, skipped: 0, reason: 'no_driver' };
 
-  const from = opts.from ? startOfDay(opts.from) : startOfDay(new Date());
-  const days = opts.days || DEFAULT_WINDOW_DAYS;
-  const windowEnd = new Date(from);
-  windowEnd.setDate(windowEnd.getDate() + days);
-  windowEnd.setHours(23, 59, 59, 999);
-
   const frequency = doc.collectionSchedule?.frequency || 'biweekly';
   const anchorDay = doc.collectionSchedule?.day || 'monday';
-  const targets = computeTargetDates(frequency, anchorDay, from, windowEnd);
+  const cap = pickupsPerMonth(frequency);
 
-  if (targets.length === 0) return { created: 0, skipped: 0 };
-
-  // Existing rows in the window — match on the calendar day, not the millisecond,
-  // so a row scheduled "today 09:00" still blocks another for "today 00:00".
+  // Existing rows already in this month — we never create more than `cap`
+  // total, regardless of how many times this runs.
   const existing = await Collection.find({
     customer: doc._id,
-    scheduledDate: { $gte: from, $lte: windowEnd },
+    month,
+    year,
   }).select('scheduledDate');
-  const taken = new Set(existing.map((c) => ymd(c.scheduledDate)));
 
+  if (existing.length >= cap) {
+    return { created: 0, skipped: existing.length };
+  }
+
+  const taken = new Set(existing.map((c) => ymd(c.scheduledDate)));
+  const targets = computeMonthlyDates(frequency, anchorDay, year, month);
   const fresh = targets.filter((d) => !taken.has(ymd(d)));
-  if (fresh.length === 0) return { created: 0, skipped: targets.length };
+
+  // Cap to the remaining slots so we hit exactly `cap` total for the month.
+  const slotsLeft = cap - existing.length;
+  const toCreate = fresh.slice(0, slotsLeft);
+  if (toCreate.length === 0) return { created: 0, skipped: existing.length };
 
   const baseId = Date.now();
   let counter = await Collection.countDocuments();
-  const docs = fresh.map((d) => {
+  const docs = toCreate.map((d) => {
     counter += 1;
     return {
       collectionId: `COL-${baseId}-${String(counter).padStart(4, '0')}`,
@@ -133,23 +156,47 @@ const generateForCustomer = async (customer, opts = {}) => {
     };
   });
 
-  await Collection.insertMany(docs, { ordered: false });
+  const created = await Collection.insertMany(docs, { ordered: false });
 
-  // Auto-bill: ensure each month touched by these pickups has an invoice so
-  // the customer dashboard "Current Invoice" panel never goes empty.
-  const monthsTouched = new Set(docs.map((d) => `${d.year}-${d.month}`));
-  for (const key of monthsTouched) {
-    const [year, month] = key.split('-').map(Number);
-    await invoiceService.ensureMonthlyInvoice(doc._id, month, year).catch((err) => {
-      logger.error(`ensureMonthlyInvoice failed for ${doc.customerId} ${key}: ${err.message}`);
-    });
+  // Per-pickup invoicing: one invoice per Collection, priced at
+  // monthlyFee / pickupsPerMonth. Fire sequentially so a transient DB hiccup
+  // doesn't silently swallow half the batch.
+  for (const c of created) {
+    try {
+      await invoiceService.ensurePickupInvoice(c);
+    } catch (err) {
+      logger.error(`ensurePickupInvoice failed for ${c.collectionId}: ${err.message}`);
+    }
   }
 
-  return { created: docs.length, skipped: targets.length - docs.length };
+  return { created: created.length, skipped: existing.length };
 };
 
 /**
- * Generate / extend the rolling window for every active assigned customer.
+ * Materialise pickups for one customer for the current + next N months.
+ * Idempotent — safe to call from startup and from the daily cron.
+ */
+const generateForCustomer = async (customer, opts = {}) => {
+  const monthsAhead = opts.monthsAhead || MONTHS_AHEAD;
+  const now = opts.from ? new Date(opts.from) : new Date();
+
+  let totalCreated = 0;
+  let totalSkipped = 0;
+  let reason = null;
+  for (let i = 0; i < monthsAhead; i++) {
+    const target = new Date(now.getFullYear(), now.getMonth() + i, 1);
+    const year = target.getFullYear();
+    const month = target.getMonth() + 1;
+    const r = await generateForCustomerMonth(customer, year, month);
+    totalCreated += r.created;
+    totalSkipped += r.skipped;
+    if (r.reason) { reason = r.reason; break; }
+  }
+  return { created: totalCreated, skipped: totalSkipped, ...(reason ? { reason } : {}) };
+};
+
+/**
+ * Generate / extend pickup schedules for every active, driver-assigned customer.
  * Safe to call at startup AND from a daily cron — idempotent.
  */
 const generateForAll = async (opts = {}) => {
@@ -193,7 +240,10 @@ const clearFutureScheduled = async (customerId, { from = new Date() } = {}) => {
 
 module.exports = {
   generateForCustomer,
+  generateForCustomerMonth,
   generateForAll,
   clearFutureScheduled,
-  computeTargetDates, // exported for testing
+  computeMonthlyDates,
+  pickupsPerMonth,
+  PICKUPS_PER_MONTH,
 };

@@ -210,13 +210,13 @@ const updateCollectionStatus = async (req, res) => {
     }
   }
 
-  // Ensure this month's invoice exists, then refresh its picked/missed counters
-  // so the customer dashboard reflects the new pickup status.
+  // Ensure this pickup's invoice exists and reflects the new status, so the
+  // customer dashboard shows the correct picked/missed badge per pickup.
   try {
-    await invoiceService.ensureMonthlyInvoice(collection.customer, collection.month, collection.year);
-    await invoiceService.refreshInvoiceCounters(collection.customer, collection.month, collection.year);
+    await invoiceService.ensurePickupInvoice(collection);
+    await invoiceService.syncPickupInvoice(collection);
   } catch (e) {
-    logger.error(`Invoice sync after collection update failed: ${e.message}`);
+    logger.error(`Pickup invoice sync after collection update failed: ${e.message}`);
   }
 
   // Notify customer via SMS

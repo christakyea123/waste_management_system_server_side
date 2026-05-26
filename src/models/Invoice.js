@@ -11,6 +11,15 @@ const invoiceSchema = new mongoose.Schema(
       ref: 'Customer',
       required: true,
     },
+    // Per-pickup billing: every invoice maps 1:1 to the Collection it covers.
+    // Legacy monthly invoices created before the per-pickup switch may have this
+    // null — keep it optional so historical data still loads. Named `pickup`
+    // (not `collection`) because `collection` is a Mongoose-reserved schema path.
+    pickup: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Collection',
+      default: null,
+    },
     month: {
       type: Number,
       required: true,
@@ -91,6 +100,9 @@ invoiceSchema.index({ customer: 1 });
 invoiceSchema.index({ status: 1 });
 invoiceSchema.index({ month: 1, year: 1 });
 invoiceSchema.index({ dueDate: 1 });
+// One invoice per pickup. Sparse so legacy monthly invoices (pickup=null)
+// don't collide with each other on the unique constraint.
+invoiceSchema.index({ pickup: 1 }, { unique: true, sparse: true });
 
 invoiceSchema.pre('save', async function (next) {
   if (!this.invoiceNumber) {

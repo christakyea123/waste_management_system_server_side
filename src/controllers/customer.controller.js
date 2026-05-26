@@ -6,6 +6,7 @@ const Complaint = require('../models/Complaint');
 const Notification = require('../models/Notification');
 const ApiResponse = require('../utils/apiResponse');
 const { paginate } = require('../utils/pagination');
+const { pickupsPerMonth } = require('../services/schedule.service');
 
 // @desc    Get customer dashboard
 // @route   GET /api/v1/customer/dashboard
@@ -22,7 +23,8 @@ const getDashboard = async (req, res) => {
   const year = now.getFullYear();
 
   const [
-    currentInvoice,
+    nextUnpaidInvoice,
+    pendingInvoiceCount,
     totalPaid,
     outstandingBalance,
     lastCollection,
@@ -32,7 +34,12 @@ const getDashboard = async (req, res) => {
     unreadNotifications,
     openComplaints,
   ] = await Promise.all([
-    Invoice.findOne({ customer: customer._id, month, year }),
+    // Per-pickup billing: surface the oldest unpaid pickup invoice so the
+    // dashboard "Current Invoice" card always points at the next thing to pay.
+    Invoice.findOne({ customer: customer._id, status: { $in: ['pending', 'overdue'] } })
+      .sort({ dueDate: 1 })
+      .populate('pickup', 'scheduledDate status'),
+    Invoice.countDocuments({ customer: customer._id, status: { $in: ['pending', 'overdue'] } }),
     Payment.aggregate([
       { $match: { customer: customer._id, status: 'success' } },
       { $group: { _id: null, total: { $sum: '$amount' } } },
@@ -53,6 +60,11 @@ const getDashboard = async (req, res) => {
     ? Math.round(((totalCollections - missedCollections) / totalCollections) * 100)
     : 100;
 
+  // Plan summary so the dashboard can render "2 pickups/month at GHS 25 each".
+  const frequency = customer.collectionSchedule?.frequency || 'biweekly';
+  const ppm = pickupsPerMonth(frequency);
+  const perPickup = ppm > 0 ? Math.round((customer.monthlyFee / ppm) * 100) / 100 : customer.monthlyFee;
+
   return ApiResponse.success(res, {
     customer,
     stats: {
@@ -65,8 +77,16 @@ const getDashboard = async (req, res) => {
       collectionRate,
       unreadNotifications,
       openComplaints,
+      pendingInvoiceCount,
     },
-    currentInvoice,
+    plan: {
+      binType: customer.binType,
+      frequency,
+      pickupsPerMonth: ppm,
+      monthlyFee: customer.monthlyFee,
+      perPickupAmount: perPickup,
+    },
+    currentInvoice: nextUnpaidInvoice,
   });
 };
 

@@ -23,15 +23,15 @@ settingsSchema.statics.getSingleton = async function () {
   return doc;
 };
 
-// Helper: read pricing with env-var fallback (so existing deploys keep working
-// until an admin saves new values from the dashboard).
+// Helper: read pricing from the DB singleton. Schema defaults (50/80/120) are
+// the source of truth — getSingleton() creates the doc with those defaults on
+// first access, so this always returns a complete pricing object.
 settingsSchema.statics.getPricing = async function () {
-  const doc = await this.findById('app').lean();
-  const envFallback = (k, d) => parseFloat(process.env[k]) || d;
+  const doc = await this.getSingleton();
   return {
-    basic:    doc?.pricing?.basic    ?? envFallback('MONTHLY_FEE_BASIC',    50),
-    standard: doc?.pricing?.standard ?? envFallback('MONTHLY_FEE_STANDARD', 80),
-    premium:  doc?.pricing?.premium  ?? envFallback('MONTHLY_FEE_PREMIUM',  120),
+    basic:    doc.pricing.basic,
+    standard: doc.pricing.standard,
+    premium:  doc.pricing.premium,
   };
 };
 
