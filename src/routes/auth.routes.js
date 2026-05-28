@@ -5,29 +5,46 @@ const {
   registerCustomer, login, logout, getMe,
   updatePassword, updateProfile, initAdmin,
   forgotPassword, resetPassword, getPublicRoutes, getPublicPricing,
+  searchUsernames,
 } = require('../controllers/auth.controller');
 const { protect } = require('../middleware/auth.middleware');
 const { validate } = require('../middleware/validate.middleware');
 const { authLimiter, registrationLimiter, smsLimiter } = require('../middleware/rateLimit.middleware');
 const { uploadProfile, handleMulterError } = require('../middleware/upload.middleware');
 
+const { SERVICE_AREAS } = require('../models/Customer');
+
 const registerValidation = [
   body('fullName').trim().notEmpty().withMessage('Full name is required'),
-  body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
+  // Email is optional now. Only validate it when a non-empty value is supplied.
+  body('email')
+    .optional({ checkFalsy: true })
+    .isEmail().normalizeEmail().withMessage('Valid email required'),
   body('phone')
     .matches(/^(\+233|0)[0-9]{9}$/)
     .withMessage('Valid Ghanaian phone number required'),
-  body('password')
-    .isLength({ min: 8 })
-    .withMessage('Password must be at least 8 characters'),
+  // No password field for customers — the phone number is the password,
+  // set server-side. Any client-sent password is ignored.
   body('residentialAddress').trim().notEmpty().withMessage('Residential address is required'),
+  body('area')
+    .trim().notEmpty().withMessage('Service area is required')
+    .isIn(SERVICE_AREAS).withMessage('Please select a valid service area'),
   body('latitude').isFloat({ min: -90, max: 90 }).withMessage('Valid latitude required'),
   body('longitude').isFloat({ min: -180, max: 180 }).withMessage('Valid longitude required'),
 ];
 
+// Login supports two shapes:
+//   - Customer:  { username, phone }     (phone is the password)
+//   - Staff:     { identifier|email, password }
 const loginValidation = [
-  body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
-  body('password').notEmpty().withMessage('Password is required'),
+  body().custom((value) => {
+    const hasCustomer = value.username && (value.phone || value.password);
+    const hasStaff = (value.identifier || value.email) && value.password;
+    if (!hasCustomer && !hasStaff) {
+      throw new Error('Provide your username and phone number to sign in');
+    }
+    return true;
+  }),
 ];
 
 router.post('/register', registrationLimiter, uploadProfile.single('profileImage'), handleMulterError, registerValidation, validate, registerCustomer);
@@ -48,6 +65,9 @@ router.post('/reset-password', [
   body('newPassword').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
 ], validate, resetPassword);
 router.post('/init-admin', initAdmin);
+
+// Public: username search for the login page (type-to-find)
+router.get('/usernames', searchUsernames);
 
 // Public: get active routes for registration form
 router.get('/routes', getPublicRoutes);

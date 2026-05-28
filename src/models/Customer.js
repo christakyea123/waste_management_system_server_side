@@ -17,6 +17,19 @@ const customerSchema = new mongoose.Schema(
       required: [true, 'Residential address is required'],
       trim: true,
     },
+    // Fixed service area ("branch") within Dunkwa-on-Offin municipality.
+    // These are the areas the company supplies — see SERVICE_AREAS below.
+    area: {
+      type: String,
+      required: [true, 'Service area is required'],
+      enum: {
+        values: [
+          'Mfoum', 'Estate', 'Oxford', 'Abesewa', 'Kadadwene/Zongo',
+          'Buzagaline', 'Main market/low cost', 'Atecham', 'Dunkwa soro', 'Atecham police',
+        ],
+        message: '{VALUE} is not a supported service area',
+      },
+    },
     location: {
       type: {
         type: String,
@@ -163,4 +176,15 @@ customerSchema.pre('save', async function (next) {
   }
 });
 
-module.exports = mongoose.model('Customer', customerSchema);
+// The fixed service areas ("branches") the company supplies in Dunkwa-on-Offin.
+// Single source of truth — the schema enum above mirrors this list. Exported so
+// validators / other modules can reuse it without re-typing the strings.
+const SERVICE_AREAS = [
+  'Mfoum', 'Estate', 'Oxford', 'Abesewa', 'Kadadwene/Zongo',
+  'Buzagaline', 'Main market/low cost', 'Atecham', 'Dunkwa soro', 'Atecham police',
+];
+
+const Customer = mongoose.model('Customer', customerSchema);
+Customer.SERVICE_AREAS = SERVICE_AREAS;
+
+module.exports = Customer;

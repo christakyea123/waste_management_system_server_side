@@ -1,6 +1,8 @@
 const rateLimit = require('express-rate-limit');
 
-const isDev = process.env.NODE_ENV === 'development';
+// Bypass rate limiting in local development and automated tests. In production
+// (or any other NODE_ENV) the limiters are enforced normally.
+const bypass = ['development', 'test'].includes(process.env.NODE_ENV);
 
 const createLimiter = (windowMs, max, message, options = {}) =>
   rateLimit({
@@ -10,7 +12,7 @@ const createLimiter = (windowMs, max, message, options = {}) =>
     standardHeaders: true,
     legacyHeaders: false,
     skipSuccessfulRequests: false,
-    skip: isDev ? () => true : undefined,
+    skip: bypass ? () => true : undefined,
     ...options,
   });
 

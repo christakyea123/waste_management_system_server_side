@@ -226,10 +226,23 @@ const deleteCustomer = async (req, res) => {
 // @route   POST /api/v1/admin/drivers
 // @access  Admin
 const createDriver = async (req, res) => {
-  const { fullName, email, phone, password, truckNumber, licenseNumber, zone } = req.body;
+  const { fullName, email, phone, truckNumber, licenseNumber, zone } = req.body;
 
-  const existing = await User.findOne({ $or: [{ email }, { phone }] });
-  if (existing) return ApiResponse.error(res, 'Email or phone already in use', 409);
+  // Phone-as-password (same flow as customers): the driver logs in with an
+  // auto-generated username + their phone number. Admin never sets a password.
+  const password = phone;
+
+  // Email is optional. Normalise blank to undefined so it doesn't collide on
+  // the sparse-unique index or fail the email format validator.
+  const normalisedEmail = email && email.trim() ? email.trim().toLowerCase() : undefined;
+
+  const orClauses = [{ phone }];
+  if (normalisedEmail) orClauses.push({ email: normalisedEmail });
+  const existing = await User.findOne({ $or: orClauses });
+  if (existing) {
+    const clash = normalisedEmail && existing.email === normalisedEmail ? 'Email' : 'Phone number';
+    return ApiResponse.error(res, `${clash} already in use`, 409);
+  }
 
   let profileImage = null;
   let profileImagePublicId = null;
@@ -243,8 +256,11 @@ const createDriver = async (req, res) => {
     }
   }
 
+  // Auto-generate a unique login username (e.g. "kojo.driver42").
+  const username = await User.generateUniqueUsername(fullName);
+
   const user = await User.create({
-    fullName, email, phone, password, role: 'driver',
+    fullName, email: normalisedEmail, phone, password, username, role: 'driver',
     profileImage,
     profileImagePublicId,
     isVerified: true,
@@ -258,10 +274,11 @@ const createDriver = async (req, res) => {
   });
 
   smsService
-    .send(phone, `035 F Arkoh: Welcome ${fullName}. Driver ID: ${driver.driverId}, temp password: ${password}. Please log in and change your password promptly.`)
+    .send(phone, `035 F Arkoh: Welcome ${fullName}. Driver ID: ${driver.driverId}. Log in with username "${username}" and your phone number as the password.`)
     .catch((e) => logger.error(`Driver welcome SMS failed: ${e.message}`));
 
-  return ApiResponse.created(res, { driver }, 'Driver created successfully');
+  // Return the generated username so the admin UI can show it.
+  return ApiResponse.created(res, { driver, username }, 'Driver created successfully');
 };
 
 // @desc    Get single driver

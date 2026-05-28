@@ -33,11 +33,11 @@ beforeAll(async () => {
     .field('fullName', 'Payment Test User')
     .field('email', email)
     .field('phone', '0244555777')
-    .field('password', 'TestPass123')
     .field('residentialAddress', '1 Payment Street, Accra')
+    .field('area', 'Mfoum')
     .field('latitude', '5.6037')
     .field('longitude', '-0.1870')
-    .field('binType', 'basic');
+    .field('binType', 'standard');
 
   customerCookie = extractCookie(res);
   const customer = await Customer.findOne({ user: res.body.user._id });

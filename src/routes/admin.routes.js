@@ -32,9 +32,10 @@ router.delete('/customers/:id', isSuperAdmin, deleteCustomer);
 // Driver management
 router.post('/drivers', uploadProfile.single('profileImage'), handleMulterError, [
   body('fullName').trim().notEmpty().withMessage('Full name required'),
-  body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
+  // Email optional; password not accepted — the driver logs in with an
+  // auto-generated username + phone (phone is the password).
+  body('email').optional({ checkFalsy: true }).isEmail().normalizeEmail().withMessage('Valid email required'),
   body('phone').matches(/^(\+233|0)[0-9]{9}$/).withMessage('Valid phone required'),
-  body('password').isLength({ min: 8 }).withMessage('Password 8+ chars required'),
   body('truckNumber').notEmpty().withMessage('Truck number required'),
 ], validate, createDriver);
 router.get('/drivers', getDrivers);

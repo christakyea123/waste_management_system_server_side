@@ -32,6 +32,7 @@ const sendTokenResponse = (user, statusCode, res) => {
     fullName: user.fullName,
     email: user.email,
     phone: user.phone,
+    username: user.username,
     role: user.role,
     profileImage: user.profileImage,
     isActive: user.isActive,

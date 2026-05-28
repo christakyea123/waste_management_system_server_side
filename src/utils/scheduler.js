@@ -53,16 +53,10 @@ const initScheduler = () => {
     }
   });
 
-  // Send payment reminders daily at 9 AM
-  cron.schedule('0 9 * * *', async () => {
-    logger.info('Sending payment reminders...');
-    try {
-      const sent = await invoiceService.sendPaymentReminders();
-      logger.info(`Payment reminders sent: ${sent}`);
-    } catch (err) {
-      logger.error(`Payment reminder cron failed: ${err.message}`);
-    }
-  });
+  // NOTE: Payment ("owing") reminders are intentionally NOT sent automatically.
+  // Per the owner, the admin sends them manually from the dashboard (the bell /
+  // reminder icon), which calls POST /api/v1/admin/invoices/send-reminders or
+  // /api/v1/admin/invoices/:id/remind. Do not re-add a reminder cron here.
 
   logger.info('Cron scheduler initialized');
 };

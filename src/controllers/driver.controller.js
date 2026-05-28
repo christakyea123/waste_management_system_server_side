@@ -95,9 +95,14 @@ const getCollections = async (req, res) => {
   const driver = await Driver.findOne({ user: req.user._id });
   if (!driver) return ApiResponse.error(res, 'Driver not found', 404);
 
-  const { page, limit, status, date } = req.query;
+  const { page, limit, status, date, month, year } = req.query;
   const query = { driver: driver._id };
   if (status) query.status = status;
+  // Month/year scoping so the driver list matches the customer's per-month view
+  // (a Standard customer shows exactly their 4 weekly pickups for the month,
+  // not the current + next month the scheduler has materialised ahead).
+  if (month) query.month = parseInt(month, 10);
+  if (year) query.year = parseInt(year, 10);
   if (date) {
     const d = new Date(date);
     const start = new Date(d.setHours(0, 0, 0, 0));
@@ -142,6 +147,10 @@ const getCollectionsSummary = async (req, res) => {
       const end = new Date(d.setHours(23, 59, 59, 999));
       match.scheduledDate = { $gte: start, $lte: end };
     }
+  } else {
+    // Scope the chip counts to the selected month/year so they match the list.
+    if (req.query.month) match.month = parseInt(req.query.month, 10);
+    if (req.query.year) match.year = parseInt(req.query.year, 10);
   }
 
   const rows = await Collection.aggregate([
@@ -210,13 +219,14 @@ const updateCollectionStatus = async (req, res) => {
     }
   }
 
-  // Ensure this pickup's invoice exists and reflects the new status, so the
-  // customer dashboard shows the correct picked/missed badge per pickup.
+  // Refresh the month's invoice counters (completed / missed pickups) so the
+  // customer dashboard reflects reality. Billing stays a flat monthly fee — the
+  // counters are informational only.
   try {
-    await invoiceService.ensurePickupInvoice(collection);
-    await invoiceService.syncPickupInvoice(collection);
+    await invoiceService.ensureMonthlyInvoice(collection.customer, collection.month, collection.year);
+    await invoiceService.refreshInvoiceCounters(collection.customer, collection.month, collection.year);
   } catch (e) {
-    logger.error(`Pickup invoice sync after collection update failed: ${e.message}`);
+    logger.error(`Invoice counter refresh after collection update failed: ${e.message}`);
   }
 
   // Notify customer via SMS

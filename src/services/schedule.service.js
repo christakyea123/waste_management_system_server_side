@@ -12,15 +12,15 @@ const logger = require('../utils/logger');
  *   standard (weekly)       → 4 pickups / month (Standard plan)
  *   premium  (twice_weekly) → 8 pickups / month (Premium plan)
  *
- * Why per-month instead of a rolling window: the customer pays a monthly fee
- * that explicitly buys N pickups. Scheduling 3 biweekly pickups inside a 30-day
- * rolling window (which happens when the anchor day aligns) would let a Basic
- * customer get a free pickup every other month. The calendar-month cap matches
- * the per-pickup invoicing model 1:1.
+ * Why per-month instead of a rolling window: the customer pays a flat monthly
+ * subscription that explicitly buys N pickups. Scheduling 3 biweekly pickups
+ * inside a 30-day rolling window (which happens when the anchor day aligns)
+ * would give a Basic customer a free pickup every other month.
  *
- * Each created Collection gets its own per-pickup invoice (see invoice.service)
- * so the customer dashboard shows one bill per pickup, priced at
- * monthlyFee / pickupsPerMonth.
+ * Billing is decoupled from scheduling: each customer gets ONE monthly
+ * subscription invoice (full plan fee), created up front on registration and on
+ * the 1st of each month — see invoice.service.ensureMonthlyInvoice. Materialising
+ * a month's pickups also ensures that month's invoice exists as a safety net.
  */
 
 const DAY_INDEX = {
@@ -158,15 +158,13 @@ const generateForCustomerMonth = async (customer, year, month) => {
 
   const created = await Collection.insertMany(docs, { ordered: false });
 
-  // Per-pickup invoicing: one invoice per Collection, priced at
-  // monthlyFee / pickupsPerMonth. Fire sequentially so a transient DB hiccup
-  // doesn't silently swallow half the batch.
-  for (const c of created) {
-    try {
-      await invoiceService.ensurePickupInvoice(c);
-    } catch (err) {
-      logger.error(`ensurePickupInvoice failed for ${c.collectionId}: ${err.message}`);
-    }
+  // Subscription billing: ensure the customer's single monthly invoice exists
+  // for this month (full plan fee, created up front). One invoice per month,
+  // not per pickup.
+  try {
+    await invoiceService.ensureMonthlyInvoice(doc._id, month, year);
+  } catch (err) {
+    logger.error(`ensureMonthlyInvoice failed for ${doc.customerId} ${month}/${year}: ${err.message}`);
   }
 
   return { created: created.length, skipped: existing.length };

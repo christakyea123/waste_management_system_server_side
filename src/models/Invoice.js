@@ -11,15 +11,10 @@ const invoiceSchema = new mongoose.Schema(
       ref: 'Customer',
       required: true,
     },
-    // Per-pickup billing: every invoice maps 1:1 to the Collection it covers.
-    // Legacy monthly invoices created before the per-pickup switch may have this
-    // null — keep it optional so historical data still loads. Named `pickup`
-    // (not `collection`) because `collection` is a Mongoose-reserved schema path.
-    pickup: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Collection',
-      default: null,
-    },
+    // Monthly subscription billing: one invoice per customer per {month, year}
+    // for the full plan fee, created up front. Uniqueness is enforced at the
+    // application layer (ensureMonthlyInvoice does a findOne-before-create) plus
+    // the compound index below.
     month: {
       type: Number,
       required: true,
@@ -98,11 +93,11 @@ const invoiceSchema = new mongoose.Schema(
 // invoiceNumber already indexed via unique:true above
 invoiceSchema.index({ customer: 1 });
 invoiceSchema.index({ status: 1 });
-invoiceSchema.index({ month: 1, year: 1 });
 invoiceSchema.index({ dueDate: 1 });
-// One invoice per pickup. Sparse so legacy monthly invoices (pickup=null)
-// don't collide with each other on the unique constraint.
-invoiceSchema.index({ pickup: 1 }, { unique: true, sparse: true });
+// One invoice per customer per month. Not marked unique at the DB level to
+// avoid build failures on any pre-existing duplicate {customer,month,year}
+// data; ensureMonthlyInvoice enforces single-invoice-per-month in code.
+invoiceSchema.index({ customer: 1, month: 1, year: 1 });
 
 invoiceSchema.pre('save', async function (next) {
   if (!this.invoiceNumber) {

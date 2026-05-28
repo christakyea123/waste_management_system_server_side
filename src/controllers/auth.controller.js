@@ -7,6 +7,7 @@ const ActivityLog = require('../models/ActivityLog');
 const { sendTokenResponse } = require('../utils/generateToken');
 const ApiResponse = require('../utils/apiResponse');
 const smsService = require('../services/sms.service');
+const invoiceService = require('../services/invoice.service');
 const logger = require('../utils/logger');
 const { uploadToCloudinary } = require('../config/cloudinary');
 
@@ -15,13 +16,27 @@ const { uploadToCloudinary } = require('../config/cloudinary');
 // @access  Public
 const registerCustomer = async (req, res) => {
   const {
-    fullName, email, phone, password, residentialAddress,
+    fullName, email, phone, residentialAddress, area,
     latitude, longitude, binType, emergencyContact, collectionRoute,
   } = req.body;
 
-  const existingUser = await User.findOne({ $or: [{ email }, { phone }] });
+  // Phone-as-password: customers don't set a password. The phone number IS the
+  // password (hashed like any other), so they only ever provide phone + username
+  // at login. Ignore any client-supplied password.
+  const password = phone;
+
+  // Email is optional — normalise blank/empty to undefined so it isn't stored
+  // as '' (which would collide on the sparse-unique index for every emailless
+  // user and fail the format validator).
+  const normalisedEmail = email && email.trim() ? email.trim().toLowerCase() : undefined;
+
+  // Build the uniqueness check from whatever identifiers were actually supplied.
+  const orClauses = [{ phone }];
+  if (normalisedEmail) orClauses.push({ email: normalisedEmail });
+  const existingUser = await User.findOne({ $or: orClauses });
   if (existingUser) {
-    return ApiResponse.error(res, 'Email or phone number already registered', 409);
+    const clash = normalisedEmail && existingUser.email === normalisedEmail ? 'Email' : 'Phone number';
+    return ApiResponse.error(res, `${clash} already registered`, 409);
   }
 
   // Upload profile image to Cloudinary if provided
@@ -37,9 +52,13 @@ const registerCustomer = async (req, res) => {
     }
   }
 
+  // Auto-generate a unique login username (e.g. "kwame.mensah47"). Generated
+  // server-side so uniqueness is guaranteed — any client-sent value is ignored.
+  const username = await User.generateUniqueUsername(fullName);
+
   // role is always 'customer' for self-registration — never trust client input
   const user = await User.create({
-    fullName, email, phone, password, role: 'customer',
+    fullName, email: normalisedEmail, phone, password, username, role: 'customer',
     profileImage,
     profileImagePublicId,
   });
@@ -47,15 +66,25 @@ const registerCustomer = async (req, res) => {
   const customer = await Customer.create({
     user: user._id,
     residentialAddress,
+    area,
     location: {
       type: 'Point',
       coordinates: [parseFloat(longitude) || 0, parseFloat(latitude) || 0],
       formattedAddress: residentialAddress,
     },
-    binType: binType || 'basic',
+    binType: binType || 'standard',
     emergencyContact: emergencyContact ? JSON.parse(emergencyContact) : {},
     collectionRoute: collectionRoute || null,
   });
+
+  // Subscription billing: issue the first monthly invoice immediately on
+  // registration (the customer owes the plan fee whether or not pickups happen,
+  // like any monthly subscription). The Customer pre-save hook has already set
+  // monthlyFee from the plan, so the invoice picks up the correct amount.
+  const now = new Date();
+  invoiceService
+    .ensureMonthlyInvoice(customer._id, now.getMonth() + 1, now.getFullYear())
+    .catch((e) => logger.error(`Registration invoice failed for ${customer.customerId}: ${e.message}`));
 
   // Send welcome SMS to customer
   smsService.sendWelcome(user).catch((e) => logger.error(`Welcome SMS failed: ${e.message}`));
@@ -83,11 +112,51 @@ const registerCustomer = async (req, res) => {
 // @route   POST /api/v1/auth/login
 // @access  Public
 const login = async (req, res) => {
-  const { email, password } = req.body;
+  const { email, identifier, username, phone, password } = req.body;
 
-  const user = await User.findOne({ email }).select('+password');
-  if (!user || !(await user.comparePassword(password))) {
-    return ApiResponse.error(res, 'Invalid email or password', 401);
+  // Two supported login modes:
+  //   1. Customer phone-as-password: { username, phone } — look up by username,
+  //      verify the phone matches (phone is stored as the hashed password).
+  //   2. Staff email/phone + password: { identifier|email, password } — the
+  //      classic flow, used by admins and drivers.
+  // Normalise a phone to a canonical 0XXXXXXXXX form so "+233.." and "0.." match.
+  const canonPhone = (p) => {
+    const c = (p || '').toString().replace(/[\s-]/g, '');
+    if (c.startsWith('+233')) return `0${c.slice(4)}`;
+    if (c.startsWith('233')) return `0${c.slice(3)}`;
+    return c;
+  };
+
+  let user;
+  let authed = false;
+
+  if (username) {
+    // Customer phone-as-password: look up by username, then check the entered
+    // phone matches the account's phone (phone IS the password, so a direct,
+    // format-tolerant comparison is equivalent and avoids hash format issues).
+    user = await User.findOne({ username: String(username).trim().toLowerCase() });
+    const entered = phone || password;
+    authed = !!(user && entered && canonPhone(entered) === canonPhone(user.phone));
+  } else {
+    // Staff email/phone + password (admins, drivers, legacy clients).
+    const raw = (identifier || email || '').trim();
+    const looksLikeEmail = raw.includes('@');
+    let query;
+    if (looksLikeEmail) {
+      query = { email: raw.toLowerCase() };
+    } else {
+      const cleaned = raw.replace(/[\s-]/g, '');
+      const variants = [cleaned];
+      if (cleaned.startsWith('0')) variants.push(`+233${cleaned.slice(1)}`);
+      if (cleaned.startsWith('+233')) variants.push(`0${cleaned.slice(4)}`);
+      query = { phone: { $in: variants } };
+    }
+    user = await User.findOne(query).select('+password');
+    authed = !!(user && password && (await user.comparePassword(password)));
+  }
+
+  if (!authed) {
+    return ApiResponse.error(res, 'Invalid credentials', 401);
   }
 
   if (!user.isActive) {
@@ -280,6 +349,30 @@ const initAdmin = async (req, res) => {
   return ApiResponse.created(res, { email: admin.email }, 'Superadmin created successfully');
 };
 
+// @desc    Search login usernames (public — used by the customer & driver login
+//          pages so a user can find/confirm their username before entering phone).
+// @route   GET /api/v1/auth/usernames?q=kwa&role=customer
+// @access  Public
+// Note: requires a query of >= 2 chars and returns at most 10 matches, so the
+// full user base can't be dumped in one request. `role` defaults to customer;
+// the driver login page passes role=driver.
+const searchUsernames = async (req, res) => {
+  const q = (req.query.q || '').toString().trim().toLowerCase();
+  if (q.length < 2) return ApiResponse.success(res, { usernames: [] });
+  // Only allow the two phone-as-password roles to be searched.
+  const role = req.query.role === 'driver' ? 'driver' : 'customer';
+  // Escape regex metacharacters in the user input before building the prefix match.
+  const safe = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const users = await User.find({
+    role,
+    username: { $regex: `^${safe}`, $options: 'i' },
+  })
+    .select('username')
+    .sort({ username: 1 })
+    .limit(10);
+  return ApiResponse.success(res, { usernames: users.map((u) => u.username).filter(Boolean) });
+};
+
 // @desc    Get active routes (public — used by registration form)
 // @route   GET /api/v1/auth/routes
 // @access  Public
@@ -304,4 +397,5 @@ const getPublicPricing = async (req, res) => {
 module.exports = {
   registerCustomer, login, logout, getMe, updatePassword, updateProfile,
   initAdmin, forgotPassword, resetPassword, getPublicRoutes, getPublicPricing,
+  searchUsernames,
 };

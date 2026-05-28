@@ -34,11 +34,10 @@ const getDashboard = async (req, res) => {
     unreadNotifications,
     openComplaints,
   ] = await Promise.all([
-    // Per-pickup billing: surface the oldest unpaid pickup invoice so the
+    // Monthly subscription billing: surface the oldest unpaid invoice so the
     // dashboard "Current Invoice" card always points at the next thing to pay.
     Invoice.findOne({ customer: customer._id, status: { $in: ['pending', 'overdue'] } })
-      .sort({ dueDate: 1 })
-      .populate('pickup', 'scheduledDate status'),
+      .sort({ dueDate: 1 }),
     Invoice.countDocuments({ customer: customer._id, status: { $in: ['pending', 'overdue'] } }),
     Payment.aggregate([
       { $match: { customer: customer._id, status: 'success' } },
@@ -60,10 +59,9 @@ const getDashboard = async (req, res) => {
     ? Math.round(((totalCollections - missedCollections) / totalCollections) * 100)
     : 100;
 
-  // Plan summary so the dashboard can render "2 pickups/month at GHS 25 each".
-  const frequency = customer.collectionSchedule?.frequency || 'biweekly';
+  // Plan summary so the dashboard can render "GHS 160/month — includes 4 pickups".
+  const frequency = customer.collectionSchedule?.frequency || 'weekly';
   const ppm = pickupsPerMonth(frequency);
-  const perPickup = ppm > 0 ? Math.round((customer.monthlyFee / ppm) * 100) / 100 : customer.monthlyFee;
 
   return ApiResponse.success(res, {
     customer,
@@ -84,7 +82,6 @@ const getDashboard = async (req, res) => {
       frequency,
       pickupsPerMonth: ppm,
       monthlyFee: customer.monthlyFee,
-      perPickupAmount: perPickup,
     },
     currentInvoice: nextUnpaidInvoice,
   });
