@@ -26,8 +26,18 @@ class InvoiceService {
       const existing = await Invoice.findOne({ customer: customerId, month, year });
       if (existing) return existing;
 
-      const customer = await Customer.findById(customerId);
+      const customer = await Customer.findById(customerId).populate('user', 'role');
       if (!customer) return null;
+
+      // Never bill staff. An admin/superadmin may have a leftover customer
+      // profile (e.g. they registered to test, then were promoted) — they are
+      // not paying customers, so skip invoicing them entirely. This is the
+      // single chokepoint for ALL invoice creation (registration, collection
+      // create, auto-scheduler, monthly cron, backfill), so guarding here
+      // covers every path.
+      if (customer.user && ['admin', 'superadmin'].includes(customer.user.role)) {
+        return null;
+      }
 
       const dueDay = parseInt(process.env.BILLING_DUE_DAY) || 25;
       let dueDate = new Date(year, month - 1, dueDay);

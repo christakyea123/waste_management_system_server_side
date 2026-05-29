@@ -349,28 +349,45 @@ const initAdmin = async (req, res) => {
   return ApiResponse.created(res, { email: admin.email }, 'Superadmin created successfully');
 };
 
-// @desc    Search login usernames (public — used by the customer & driver login
-//          pages so a user can find/confirm their username before entering phone).
-// @route   GET /api/v1/auth/usernames?q=kwa&role=customer
+// @desc    Search login accounts (public — used by the customer & driver login
+//          pages so a user can find their username by typing their name OR
+//          username, then confirm with their phone).
+// @route   GET /api/v1/auth/usernames?q=sam&role=customer
 // @access  Public
+// Matches the query against the username (prefix) OR the full name (anywhere),
+// so a user who only remembers their name can still find their account.
+// Returns { username, fullName } pairs so the dropdown can show a friendly label.
 // Note: requires a query of >= 2 chars and returns at most 10 matches, so the
 // full user base can't be dumped in one request. `role` defaults to customer;
 // the driver login page passes role=driver.
 const searchUsernames = async (req, res) => {
   const q = (req.query.q || '').toString().trim().toLowerCase();
-  if (q.length < 2) return ApiResponse.success(res, { usernames: [] });
+  if (q.length < 2) return ApiResponse.success(res, { usernames: [], results: [] });
   // Only allow the two phone-as-password roles to be searched.
   const role = req.query.role === 'driver' ? 'driver' : 'customer';
-  // Escape regex metacharacters in the user input before building the prefix match.
+  // Escape regex metacharacters in the user input before building the matches.
   const safe = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const users = await User.find({
     role,
-    username: { $regex: `^${safe}`, $options: 'i' },
+    username: { $exists: true, $ne: null },
+    $or: [
+      { username: { $regex: `^${safe}`, $options: 'i' } }, // username starts with q
+      { fullName: { $regex: safe, $options: 'i' } },        // name contains q
+    ],
   })
-    .select('username')
-    .sort({ username: 1 })
+    .select('username fullName')
+    .sort({ fullName: 1 })
     .limit(10);
-  return ApiResponse.success(res, { usernames: users.map((u) => u.username).filter(Boolean) });
+
+  const results = users
+    .filter((u) => u.username)
+    .map((u) => ({ username: u.username, fullName: u.fullName || '' }));
+
+  // `usernames` kept for backwards-compatibility; `results` is the richer shape.
+  return ApiResponse.success(res, {
+    usernames: results.map((r) => r.username),
+    results,
+  });
 };
 
 // @desc    Get active routes (public — used by registration form)
